@@ -94,7 +94,11 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  static const uint8_t boot_message[] = "flight-app boot\r\n";
+  (void)HAL_UART_Transmit(&huart2, boot_message, sizeof(boot_message) - 1U, 100U);
+  static const uint8_t usart1_test_message[] = "USART1 hello test\r\n";
+  (void)HAL_UART_Transmit(&huart1, usart1_test_message,
+                          sizeof(usart1_test_message) - 1U, 100U);
   /* USER CODE END 2 */
 
   /* Init scheduler */

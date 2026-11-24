@@ -25,6 +25,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "hil_link.h"
 
 /* USER CODE END Includes */
 
@@ -45,6 +46,11 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
+static const osThreadAttr_t hil_loopback_attributes = {
+  .name = "hilLoopback",
+  .stack_size = 768U,
+  .priority = osPriorityAboveNormal,
+};
 
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
@@ -95,7 +101,10 @@ void MX_FREERTOS_Init(void) {
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
+  if (osThreadNew(HilLink_LoopbackTask, NULL, &hil_loopback_attributes) == NULL)
+  {
+    Error_Handler();
+  }
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -117,7 +126,8 @@ void StartDefaultTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+    osDelay(500U);
   }
   /* USER CODE END StartDefaultTask */
 }

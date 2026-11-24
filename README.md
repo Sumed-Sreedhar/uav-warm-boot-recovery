@@ -1,68 +1,50 @@
 # UAV Warm-Boot Recovery
 
-Deterministic warm-boot fast recovery for a UAV flight computer on **STM32F446RE**, tested in a closed-loop HIL setup.
+Embedded C firmware for a UAV flight computer on the **STM32F446RE**. The project investigates how quickly the flight computer can resume valid control after a watchdog reset, and when a saved attitude estimate is too stale to reuse. A separate Python simulator will provide sensor data and ground truth for closed-loop hardware-in-the-loop (HIL) tests.
 
-A dual-path bootloader tells a cold power-on apart from a watchdog reset. On a warm boot it skips gyro-bias calibration, validates the saved flight state with a CRC, re-arms the sensor link and restarts the FreeRTOS tasks in milliseconds. If validation fails it falls back to a full cold boot.
+## Current status
 
-> This repo is the **embedded C firmware only**. The drone dynamics and sensor models live in a separate custom Python engine.
+The standalone flight application builds with STM32CubeIDE and has been tested on a **NUCLEO-F446RE**. The board has produced both startup messages, blinked LD2 from a FreeRTOS task, and echoed a short message through USART1 DMA at 921600 baud. Sustained traffic across DMA buffer wraps is the next bench check. HIL packet parsing, estimation, PID, checkpointing, and warm recovery are planned.
 
-## Why
+## Build and flash
 
-A watchdog reset on a normal flight computer repeats the full cold start, including a 2-3 s gyro calibration, while the vehicle is airborne. The calibrated state was valid milliseconds before the fault, so most of that work is wasted. This project makes each reset cheap and checks the result against simulated ground truth.
+1. In STM32CubeIDE, use **File → Import → Existing Projects into Workspace** and select the [`flight-app/`](flight-app/) directory.
+2. Build the **Debug** configuration with CubeIDE's bundled GNU Tools for STM32.
+3. Connect the Nucleo over its ST-LINK USB port and run or debug the **flight-app** project to flash it. If the debugger stops at `main()`, resume execution.
+4. Use [`flight-app.ioc`](flight-app/flight-app.ioc) to inspect or regenerate the CubeMX configuration. Keep hand-written edits within the generated user-code sections or in separate source files.
 
-## Architecture
+## UART bring-up
 
+| Interface | Connection | Serial settings | Expected behavior |
+| --- | --- | --- | --- |
+| USART2 debug | ST-LINK virtual COM port | 115200 baud, 8N1, no flow control | `flight-app boot` once per reset and any USART1 loopback errors |
+| USART1 HIL transport | External 3.3 V USB-to-UART adapter | 921600 baud, 8N1, no flow control | `USART1 hello test` once per reset, then an exact echo of received bytes |
+
+Use three wires for the external adapter. The Nucleo stays powered through ST-LINK, and the adapter's VCC pin stays disconnected.
+
+| USB-to-UART adapter | NUCLEO-F446RE |
+| --- | --- |
+| TXD | D2 (PA10, USART1 RX) |
+| RXD | D8 (PA9, USART1 TX) |
+| GND | GND |
+
+On Linux, find the two devices with `ls -l /dev/serial/by-id/`. Open each port in its own terminal. Replace the device names below with the ones reported on your machine.
+
+```sh
+picocom -b 115200 /dev/ttyACM0  # ST-LINK
+picocom -b 921600 /dev/ttyUSB0  # External adapter, in a second terminal
 ```
- Laptop (Python engine)                         STM32F446RE
-┌─────────────────────────┐  sensor frames   ┌──────────────────────────────┐
-│ vehicle dynamics        │ ───────────────► │ USART RX (DMA) → parser      │
-│ simulated IMU/mag/GPS   │   921600 baud    │ Mahony attitude → PID        │
-│ ground-truth attitude   │                  │ bootloader + warm-boot state │
-│ applies PID outputs     │ ◄─────────────── │ USART TX (DMA)               │
-└─────────────────────────┘  PID output      └──────────────┬───────────────┘
-                             frames                         │ GPIO toggle
-                                                            ▼
-                                                    logic analyser
-```
 
-- **No physical sensors on the STM32.** All sensor data arrives from the laptop over UART (USART + DMA, 921600 baud).
-- **Closed loop through the MCU.** The simulated vehicle only moves in response to PID outputs the real firmware computed, so a reset has a physical consequence in the sim.
-- **The sim runs on the wall clock**, so the vehicle keeps flying while the MCU is down and the recovery gap is visible.
-- **Control loop timing (proposed):** the control task runs on its own fixed period and reads the latest sensor frame, so a laptop stall looks like stale data and not a hung task.
+Open both ports before pressing **RESET** so you can see both startup lines. LD2 should complete one blink cycle per second. With local echo off in Picocom, type `hello` in the USART1 terminal. It should appear once. Exit Picocom with **Ctrl+A**, then **Ctrl+X**.
 
-## Boot paths
+For the buffer-wrap test, send at least **513 known bytes** in one burst, then a multi-kilobyte sequence while reading the echo concurrently. Compare the returned length and contents byte for byte. [`hil_link.c`](flight-app/Core/Src/hil_link.c) uses a 512-byte circular RX DMA buffer and a separate normal-mode TX DMA buffer. On a detected UART/DMA error or receive overrun, the loopback reports the failure on USART2 and stops until reset.
 
-| | Cold boot (POR / NRST) | Warm boot (IWDG / WWDG) |
-|---|---|---|
-| Reset cause | read RCC reset flags, then clear them | same |
-| State | zeroed, fresh sentinel | sentinel + CRC32 checked |
-| Peripherals | full init | critical only, **incl. USART + DMA** |
-| Gyro bias | calibrated (2-3 s) | loaded from saved state |
-| On failure | n/a | fall back to cold boot |
+## Planned flight architecture
 
-After a warm boot the UART must be re-initialised (peripherals reset with the MCU), its error flags cleared, and the parser resyncs on the next valid frame. Frames sent during the reset are lost.
+The Python simulator sends raw gyro, accelerometer, and magnetometer samples over USART1. The MCU parses those frames, and a periodic FreeRTOS task reads the latest fresh sample, updates the attitude estimate, runs PID, and returns the control output. The simulator continues advancing during a reset and records ground truth. All sensor inputs for this experiment come from the simulator.
 
-## Persistent state
+- **Checkpointing.** Commit state late in each control iteration to one of two slots in a fixed `.noinit` region in SRAM1. Store the attitude quaternion, gyro bias, arming state, GPS lock validity, sequence ID, sentinel, and CRC32. Keep DMA buffers outside the retained region.
+- **Warm recovery.** A watchdog reset triggers a recovery attempt. Check checkpoint integrity, then use a conservative reset-gap bound and fresh sensor observations to decide whether to accept, correct, or reject the attitude. Evaluate gyro-bias validity separately. If attitude cannot be reused, attempt sensor-based reinitialization from usable accelerometer and magnetometer observations without requiring stationary calibration in flight.
+- **Evaluation.** Compare cold boot, blind warm restore, sensor-based warm recovery, and the proposed check. Inject IWDG starvation, WWDG deadline overruns, and software resets during checkpoint writes. Measure watchdog detection separately from reset-to-first-valid-control-output recovery. Use DWT cycle counts and GPIO scope markers for timing, and simulator ground truth for attitude error and false-accept and false-reject rates.
 
-Fixed-address struct in `.noinit` SRAM1: Mahony quaternion, gyro bias, arming state, GPS lock validity, sequence ID, magic sentinel, CRC32. Written and re-hashed once per control-loop iteration, late in the loop body. DMA buffers stay outside it.
-
-Watchdog resets never remove VDD, so plain SRAM is enough. Surviving real power loss is out of scope.
-
-## Faults and measurement
-
-- **Faults (software only):** IWDG starvation (hung task), WWDG deadline overrun (late task), reset during the state-write step (torn write).
-- **Latency:** DWT cycle counter plus a GPIO toggle for scope cross-check.
-- **Drift:** angular error between simulator ground truth and the firmware estimate across the recovery gap.
-- **Also tracked:** CRC pass/fail rate, fallback-to-cold rate, flash/SRAM footprint, latency vs. clock frequency.
-
-## Tasks
-
-FreeRTOS on STM32 HAL. Control (estimator + PID + state write), UART parser, fault state machine, and possibly a logger. Fault injection runs from a test-only task.
-
-## Out of scope
-
-Brownout / power-loss recovery, preserving live FreeRTOS TCBs and stacks, MPU setup in the bootloader.
-
-## TBD
-
-Memory map, frame format, task priorities and periods, whether PID integrator state is persisted, build and flash steps, link to the Python engine repo, license.
+The build order is flight application and HIL first, then application-level warm recovery, then the bootloader and final timing measurements. Brownout, main-power loss, retained FreeRTOS task stacks, and bootloader MPU setup are out of scope.
