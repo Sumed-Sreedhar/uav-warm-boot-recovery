@@ -46,8 +46,8 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
-static const osThreadAttr_t hil_loopback_attributes = {
-  .name = "hilLoopback",
+static const osThreadAttr_t hil_link_attributes = {
+  .name = "hilLink",
   .stack_size = 768U,
   .priority = osPriorityAboveNormal,
 };
@@ -101,7 +101,7 @@ void MX_FREERTOS_Init(void) {
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  if (osThreadNew(HilLink_LoopbackTask, NULL, &hil_loopback_attributes) == NULL)
+  if (osThreadNew(HilLink_Task, NULL, &hil_link_attributes) == NULL)
   {
     Error_Handler();
   }

@@ -25,6 +25,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "hil_link.h"
 
 /* USER CODE END Includes */
 
@@ -96,9 +97,11 @@ int main(void)
   /* USER CODE BEGIN 2 */
   static const uint8_t boot_message[] = "flight-app boot\r\n";
   (void)HAL_UART_Transmit(&huart2, boot_message, sizeof(boot_message) - 1U, 100U);
+#if HIL_LINK_LOOPBACK
   static const uint8_t usart1_test_message[] = "USART1 hello test\r\n";
   (void)HAL_UART_Transmit(&huart1, usart1_test_message,
                           sizeof(usart1_test_message) - 1U, 100U);
+#endif
   /* USER CODE END 2 */
 
   /* Init scheduler */
